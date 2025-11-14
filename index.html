@@ -2017,34 +2017,30 @@
         // تهيئة Firebase
 
         // ==================== تهيئة Firebase المصححة ====================
-        try {
-            // التحقق من أن Firebase محمل
-            if (typeof firebase === 'undefined') {
-                throw new Error('Firebase SDK لم يتم تحميله');
-            }
-            
-            // تهيئة التطبيق إذا لم يكن مهيئاً
-            if (!firebase.apps.length) {
+        // حل تضارب مكتبات Firebase
+        if (typeof firebase !== 'undefined' && firebase.apps.length > 0) {
+            console.log('Firebase already initialized, using existing app');
+        } else {
+            try {
+                // تهيئة Firebase
                 firebase.initializeApp(firebaseConfig);
+                console.log('✅ Firebase initialized successfully');
+            } catch (error) {
+                console.error('❌ Firebase initialization error:', error);
             }
-            
-            // استخدام متغيرات منفصلة لـ Firebase فقط
-            const auth = firebase.auth();
-            const firestore = firebase.firestore();
-            
-            console.log('✅ تم تهيئة Firebase بنجاح');
-            
-            // 🔥 الإصلاح: استخدام المتغيرات مباشرة في الدوال بدلاً من تعريف globale
-            window.firebaseAuth = auth;
-            window.firestoreDB = firestore;
-            
-        } catch (error) {
-            console.error('❌ خطأ في تهيئة Firebase:', error);
-            alert('خطأ في تهيئة النظام: ' + error.message);
         }
+
+        // استخدام خدمات Firebase بشكل آمن
+        const auth = firebase.auth();
+        const firestore = firebase.firestore();
+
+        // تعيين المتغيرات العالمية بشكل آمن
+        window.firebaseAuth = auth;
+        window.firestoreDB = firestore;
 
 
         // ==================== المتغيرات العامة ====================
+        let useOfflineMode = false;
         let currentUser = null;
         let userRole = 'user';
         let userSubscription = null;
@@ -2101,44 +2097,35 @@
             try {
                 console.log('👑 محاولة الدخول كمالك...');
                 
-                // استخدام المتغير المعرّف مسبقاً
-                const userCredential = await window.firebaseAuth.signInWithEmailAndPassword(ownerEmail, ownerPassword);
-                console.log('✅ تم تسجيل الدخول بنجاح');
-                
-                // التحقق من دور المستخدم وترقيته إذا لزم الأمر
-                const userDoc = await window.firestoreDB.collection('users').doc(userCredential.user.uid).get();
-                
-                if (userDoc.exists) {
-                    const userData = userDoc.data();
+                // محاولة تسجيل الدخول أولاً
+                let userCredential;
+                try {
+                    userCredential = await window.firebaseAuth.signInWithEmailAndPassword(ownerEmail, ownerPassword);
+                    console.log('✅ تم تسجيل الدخول بنجاح');
+                } catch (signInError) {
+                    console.log('❌ فشل تسجيل الدخول:', signInError.code);
                     
-                    if (userData.role !== 'owner') {
-                        console.log('🔄 ترقية المستخدم الحالي إلى مالك...');
+                    if (signInError.code === 'auth/user-not-found') {
+                        console.log('🆕 إنشاء حساب مالك جديد...');
+                        userCredential = await window.firebaseAuth.createUserWithEmailAndPassword(ownerEmail, ownerPassword);
                         
-                        await window.firestoreDB.collection('users').doc(userCredential.user.uid).update({
-                            role: 'owner',
-                            subscription: {
-                                type: 'owner',
-                                status: 'active',
-                                startDate: firebase.firestore.FieldValue.serverTimestamp(),
-                                endDate: null,
-                                features: {
-                                    maxUsers: 100,
-                                    maxProducts: 10000,
-                                    maxStorage: '10GB',
-                                    advancedReports: true,
-                                    apiAccess: true
-                                }
-                            }
+                        await userCredential.user.updateProfile({
+                            displayName: 'مالك النظام'
                         });
                         
-                        console.log('✅ تم ترقية المستخدم إلى مالك النظام');
+                        console.log('✅ تم إنشاء حساب المالك بنجاح');
+                    } else if (signInError.code === 'auth/wrong-password') {
+                        throw new Error('كلمة المرور غير صحيحة لحساب المالك');
                     } else {
-                        console.log('✅ المستخدم بالفعل مالك النظام');
+                        throw signInError;
                     }
-                } else {
-                    // إنشاء وثيقة المستخدم كمالك إذا لم تكن موجودة
-                    console.log('📝 إنشاء وثيقة مالك جديدة...');
-                    
+                }
+
+                // الآن تأكد من وجود وثيقة المستخدم في Firestore
+                const userDoc = await window.firestoreDB.collection('users').doc(userCredential.user.uid).get();
+                
+                if (!userDoc.exists) {
+                    console.log('📝 إنشاء وثيقة مالك جديدة في Firestore...');
                     await window.firestoreDB.collection('users').doc(userCredential.user.uid).set({
                         name: 'مالك النظام',
                         email: ownerEmail,
@@ -2164,26 +2151,63 @@
                             taxNumber: ''
                         }
                     });
+                    console.log('✅ تم إنشاء وثيقة المالك بنجاح');
+                } else {
+                    console.log('✅ وثيقة المالك موجودة بالفعل');
                     
-                    console.log('✅ تم إنشاء حساب المالك بنجاح');
+                    // تحديث المستخدم الحالي إلى مالك إذا لم يكن
+                    const userData = userDoc.data();
+                    if (userData.role !== 'owner') {
+                        console.log('🔄 ترقية المستخدم إلى مالك...');
+                        await window.firestoreDB.collection('users').doc(userCredential.user.uid).update({
+                            role: 'owner',
+                            subscription: {
+                                type: 'owner',
+                                status: 'active',
+                                startDate: firebase.firestore.FieldValue.serverTimestamp(),
+                                endDate: null,
+                                features: {
+                                    maxUsers: 100,
+                                    maxProducts: 10000,
+                                    maxStorage: '10GB',
+                                    advancedReports: true,
+                                    apiAccess: true
+                                }
+                            }
+                        });
+                        console.log('✅ تم ترقية المستخدم إلى مالك');
+                    }
                 }
                 
                 return userCredential;
                 
             } catch (error) {
-                console.log('⚠️ خطأ في الدخول:', error.code);
+                console.error('❌ خطأ في إعداد حساب المالك:', error);
                 
-                if (error.code === 'auth/user-not-found') {
-                    console.log('🆕 إنشاء حساب مالك جديد من الصفر...');
-                    return await createOwnerAccount(ownerEmail, ownerPassword);
-                } else if (error.code === 'auth/wrong-password') {
-                    alert('🔐 كلمة المرور غير صحيحة لحساب المالك');
-                    throw error;
-                } else {
-                    console.error('❌ خطأ غير متوقع في الدخول كمالك:', error);
-                    alert('فشل الدخول كمالك: ' + error.message);
-                    throw error;
+                // تقديم رسالة خطأ أكثر وضوحاً
+                let errorMessage = 'فشل في الدخول كمالك: ';
+                switch (error.code) {
+                    case 'auth/invalid-email':
+                        errorMessage += 'البريد الإلكتروني غير صالح';
+                        break;
+                    case 'auth/user-disabled':
+                        errorMessage += 'الحساب معطل';
+                        break;
+                    case 'auth/user-not-found':
+                        errorMessage += 'الحساب غير موجود';
+                        break;
+                    case 'auth/wrong-password':
+                        errorMessage += 'كلمة المرور غير صحيحة';
+                        break;
+                    case 'auth/network-request-failed':
+                        errorMessage += 'مشكلة في الاتصال بالإنترنت';
+                        break;
+                    default:
+                        errorMessage += error.message;
                 }
+                
+                alert(errorMessage);
+                throw error;
             }
         }
 
@@ -2428,23 +2452,37 @@
         async function checkFirebaseConnection() {
             try {
                 if (!window.firestoreDB) {
-                    throw new Error('Firestore غير مهيئ');
+                    console.warn('⚠️ Firestore غير مهيئ، جاري التهيئة...');
+                    // إعادة التهيئة
+                    if (!firebase.apps.length) {
+                        firebase.initializeApp(firebaseConfig);
+                    }
+                    window.firestoreDB = firebase.firestore();
+                    window.firebaseAuth = firebase.auth();
                 }
                 
-                // محاولة جلب بيانات بسيطة للتحقق من الاتصال
-                const snapshot = await window.firestoreDB.collection('users').limit(1).get();
+                // محاولة بسيطة للتحقق من الاتصال بدون صلاحيات
+                await window.firestoreDB.collection('users').limit(1).get();
                 console.log('✅ اتصال Firebase نشط ويعمل');
                 return true;
+                
             } catch (error) {
                 console.error('❌ فشل الاتصال بـ Firebase:', error);
                 
-                // إذا كانت المشكلة في الصلاحيات، لا تعرض رسالة للمستخدم
-                if (error.code === 'permission-denied') {
-                    console.warn('⚠️ الصلاحيات غير كافية، ولكن الاتصال نشط');
+                // إذا كانت المشكلة في الصلاحيات، لا نعرض رسالة للمستخدم
+                if (error.code === 'permission-denied' || error.code === 'missing-or-insufficient-permissions') {
+                    console.warn('⚠️ الصلاحيات غير كافية، ولكن الاتصال نشط - يمكن للمستخدم المصادق عليه العمل');
                     return true;
                 }
                 
-                alert('⚠️ مشكلة في الاتصال بقاعدة البيانات. تأكد من اتصال الإنترنت.');
+                // إذا كانت المشكلة في الشبكة
+                if (error.code === 'unavailable' || error.code === 'network-request-failed') {
+                    console.warn('⚠️ مشكلة في الاتصال بالشبكة');
+                    alert('⚠️ يبدو أن هناك مشكلة في الاتصال بالإنترنت. النظام سيعمل في الوضع المحلي.');
+                    return false;
+                }
+                
+                console.warn('⚠️ مشكلة أخرى في الاتصال:', error.code);
                 return false;
             }
         }
@@ -2685,6 +2723,28 @@
                 });
             });
             
+            document.addEventListener('DOMContentLoaded', function() {
+                console.log('🚀 بدء تحميل التطبيق...');
+                
+                checkFirebaseConnection().then(connected => {
+                    if (connected) {
+                        console.log('🟢 متصل بـ Firebase - تهيئة النظام مع الاتصال');
+                        initAuth();
+                    } else {
+                        console.log('🟡 غير متصل بـ Firebase - تهيئة النظام المحلي');
+                        useOfflineMode = true;
+                        initLocalSystem();
+                        showApp();
+                        alert('⚠️ النظام يعمل في الوضع المحلي. بعض الميزات قد لا تكون متاحة.');
+                    }
+                }).catch(error => {
+                    console.error('🔴 خطأ في التحقق من الاتصال:', error);
+                    useOfflineMode = true;
+                    initLocalSystem();
+                    showApp();
+                });
+            });
+
             // تهيئة النظام المحلي
             initLocalSystem();
         });
